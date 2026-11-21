@@ -98,6 +98,7 @@ class QoSAwarePathSelector(app_manager.RyuApp):
         self.adjacency = defaultdict(dict)  # dpid -> {neighbor_dpid: out_port}
         self.switch_ports = defaultdict(set)  # dpid -> set(all physical port numbers)
         self.port_bytes = defaultdict(dict)  # (dpid, port) -> (timestamp, tx+rx bytes)
+        # Intended per-direction routes; local dispatch does not confirm switch state.
         self.active_flows = {}              # (src_mac, dst_mac) -> path (list of dpids)
         self.spanning_tree_ports = defaultdict(set)  # dpid -> set(ports) allowed to flood
 
@@ -254,9 +255,17 @@ class QoSAwarePathSelector(app_manager.RyuApp):
     def _monitor(self):
         while True:
             for dp in list(self.datapaths.values()):
-                self._request_port_stats(dp)
+                try:
+                    self._request_port_stats(dp)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to request port statistics from switch %s",
+                        getattr(dp, "id", "unknown"))
             hub.sleep(MONITOR_INTERVAL_SEC)
-            self._update_link_cost()
+            try:
+                self._update_link_cost()
+            except Exception:
+                self.logger.exception("Unexpected error while updating link costs")
             try:
                 self._reoptimize_active_flows()
             except Exception:
@@ -389,8 +398,14 @@ class QoSAwarePathSelector(app_manager.RyuApp):
                                  src_mac, dst_mac, old_path, new_path,
                                  old_cost if old_cost is not None else float("nan"), new_cost)
                 forward_ok = self.install_path(new_path, src_mac, dst_mac)
+                if not forward_ok:
+                    self.logger.warning(
+                        "Flow reroute incomplete for %s<->%s; retaining recorded paths",
+                        src_mac, dst_mac)
+                    continue
+
                 reverse_ok = self.install_path(reverse_path, dst_mac, src_mac)
-                if forward_ok and reverse_ok:
+                if reverse_ok:
                     self.active_flows[(src_mac, dst_mac)] = list(new_path)
                     self.active_flows[(dst_mac, src_mac)] = reverse_path
                 else:
@@ -430,13 +445,19 @@ class QoSAwarePathSelector(app_manager.RyuApp):
             src_dpid = self.host_location[src_mac][0]
             dst_dpid = self.host_location[dst_mac][0]
             path = self._best_path(src_dpid, dst_dpid)
-            if path:
-                if self.install_path(path, src_mac, dst_mac):
-                    self.active_flows[(src_mac, dst_mac)] = list(path)
-                    self.active_flows[(dst_mac, src_mac)] = list(reversed(path))
-                    # Also forward this first packet along the selected path.
-                    self._forward_packet_out(dp, msg, path, dst_mac, in_port)
-                    return
+            if not path:
+                self.logger.warning("No route available for known destination %s", dst_mac)
+                return
+            if not self.install_path(path, src_mac, dst_mac):
+                self.logger.warning("Failed to install path for known destination %s->%s",
+                                    src_mac, dst_mac)
+                return
+
+            self.active_flows[(src_mac, dst_mac)] = list(path)
+            self.active_flows[(dst_mac, src_mac)] = list(reversed(path))
+            # Also forward this first packet along the selected path.
+            self._forward_packet_out(dp, msg, path, dst_mac, in_port)
+            return
 
         # unknown destination / broadcast (ARP etc.) -> flood on spanning tree
         self._flood(dp, msg, in_port)
@@ -508,7 +529,7 @@ class QoSAwarePathSelector(app_manager.RyuApp):
                 return False
             required.append((dp, out_port))
 
-        dispatched = True
+        dispatched_count = 0
         for dp, out_port in required:
             try:
                 parser = dp.ofproto_parser
@@ -516,12 +537,20 @@ class QoSAwarePathSelector(app_manager.RyuApp):
                 actions = [parser.OFPActionOutput(out_port)]
                 self._add_flow(dp, priority=10, match=match, actions=actions,
                                idle_timeout=60, hard_timeout=0)
+                dispatched_count += 1
             except Exception:
-                dispatched = False
                 self.logger.exception("Failed to dispatch flow rule for %s->%s on switch %s",
                                       src_mac, dst_mac, getattr(dp, "id", "unknown"))
 
-        if dispatched:
-            self.logger.info("Dispatched flow rules for %s->%s along %s (cost=%.6g)",
-                             src_mac, dst_mac, path, self._path_cost(path))
-        return dispatched
+        if dispatched_count == len(required):
+            self.logger.info(
+                "Dispatched flow rules for %s->%s along %s (cost=%.6g); "
+                "switch-side acceptance is unconfirmed",
+                src_mac, dst_mac, path, self._path_cost(path))
+            return True
+
+        self.logger.warning(
+            "Partial flow-rule dispatch for %s->%s along %s: dispatched %d of %d "
+            "messages; switch-side installation is unconfirmed",
+            src_mac, dst_mac, path, dispatched_count, len(required))
+        return False

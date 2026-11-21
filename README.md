@@ -6,7 +6,7 @@ A Computer Networks group project refined into a tested SDN implementation using
 
 ## Overview
 
-The controller selects paths through a four-switch Mininet diamond topology. It learns host locations, discovers switch links, installs forwarding rules, polls OpenFlow port statistics, and periodically re-evaluates active flows.
+The controller selects paths through a four-switch Mininet diamond topology. It learns host locations, discovers switch links, dispatches forwarding rules, polls OpenFlow port statistics, and periodically re-evaluates active flows.
 
 The topology provides two routes between the host-facing switches:
 
@@ -22,14 +22,14 @@ The topology provides two routes between the host-facing switches:
 - Selects routes with NetworkX shortest-path calculation over summed reciprocal link scores.
 - Re-evaluates active flows and reroutes when the previous path is invalid or the new path has **strictly more than 15% lower aggregate cost**.
 - Validates path costs and handles invalid or missing link metrics without treating malformed links as usable routes.
-- Updates recorded forward/reverse flow state only when the required flow-rule messages can be dispatched.
+- Updates recorded forward/reverse flow state only when the required flow-rule messages can be dispatched successfully.
 
 ### Important implementation details
 
 - Delay, bandwidth, packet-loss and jitter values are configured QoS profile inputs; they are **not independently measured live** by the controller.
 - Port byte counters are sampled periodically to estimate link utilization.
 - The monitoring interval is 10 seconds.
-- A successful send_msg() call confirms local message dispatch, not a switch-side OpenFlow barrier acknowledgement. Runtime flow-table checks are used as separate evidence.
+- A successful `send_msg()` call confirms local message dispatch, not switch-side acceptance. The controller does not use OpenFlow barriers or error replies to confirm flow-table installation.
 
 ## Architecture
 
@@ -63,8 +63,8 @@ The topology provides two routes between the host-facing switches:
 - tests/ — controller unit and regression tests.
 - requirements.txt — runtime dependencies.
 - requirements-dev.txt — test dependencies.
-- docs/validation.md — automated and Mininet runtime validation notes.
-- Dynamic_QoS_SDN_Report_Reformatted.pdf — original project report; read the implementation-scope note in this README when comparing the report with the refined code.
+- docs/validation.md — automated test results and the status of Mininet runtime validation.
+- Dynamic_QoS_SDN_Report_Reformatted.pdf — original project report. It describes proposal-era methods and results that differ from the refined V1 implementation; this repository's code and README describe the current implementation.
 
 ## Setup
 
@@ -94,13 +94,7 @@ Run the automated tests from the project root:
 
 ## Validation
 
-- **Automated tests:** 31 passed in the validated Ubuntu VM.
-- **Connectivity:** after topology and controller convergence, pingall completed with 0% packet loss.
-- **Congestion response:** controller logs showed active-flow route changes between the preferred and alternate paths under changing load.
-- **Link failure and recovery:** taking the preferred link down caused traffic to use the alternate route; restoring the link allowed the controller to return to the preferred route. Switch forwarding entries and end-to-end connectivity were checked.
-- **Traffic tests:** TCP/UDP iperf tests were exercised. Individual UDP runs showed loss and out-of-order datagrams under load; these observations are not presented as guaranteed throughput or QoS improvements.
-
-See the validation notes for the scope and interpretation of these checks.
+The automated test results and the status of runtime validation are recorded in [the V1 validation notes](docs/validation.md). The unit suite uses mocked Ryu datapaths; it does not replace Mininet connectivity, rerouting, link-failure, or traffic testing.
 
 ## Limitations
 
@@ -108,7 +102,7 @@ See the validation notes for the scope and interpretation of these checks.
 - Delay, bandwidth, loss and jitter are configured profile values rather than live measurements.
 - Utilization is estimated from port byte counters and the configured link capacity.
 - Runtime behaviour depends on topology convergence, OpenFlow message handling and the virtualized host environment.
-- The test suite uses mocked datapaths for controller logic; Mininet runtime checks are separate.
+- The test suite uses mocked datapaths for controller logic; Mininet runtime checks are separate and are not verified by the unit suite.
 
 ## Attribution
 
