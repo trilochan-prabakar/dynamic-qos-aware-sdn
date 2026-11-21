@@ -1,0 +1,245 @@
+# V1 – Milestone 1 Implementation: Path Selection and Rerouting Correctness
+
+We have completed the source-code audit of this project. The audit identified seven confirmed issues and several additional risks.
+
+You are now authorized to implement the approved Milestone 1 corrections.
+
+Act as a senior SDN engineer and Python developer. Work carefully, prioritize correctness, and preserve the existing project architecture.
+
+## 1. Project context
+
+Project: Dynamic QoS-Aware Path Selection Using Software-Defined Networking (SDN).
+
+Technology stack:
+- Python
+- Ryu SDN Controller
+- OpenFlow 1.3
+- NetworkX
+- Mininet
+- Open vSwitch
+
+This is an existing project originally developed by Tanish Raj. My repository is a fork. Preserve the original authorship and attribution.
+
+Work exclusively on V1. Do not introduce V2 features.
+
+## 2. Approved engineering decisions
+
+Follow these decisions throughout implementation.
+
+### A. Path optimization objective
+
+Retain the existing NetworkX shortest-path objective.
+
+The controller currently calculates edge costs using reciprocal edge scores and selects paths by minimizing the sum of edge costs.
+
+Make all path comparisons consistent with this objective.
+
+Implement a reliable path-cost calculation that:
+
+- Sums the costs of all edges in a path.
+- Uses the same cost values as `_best_path()`.
+- Handles single-switch paths correctly.
+- Rejects missing, invalid, negative, NaN, or infinite costs.
+- Handles paths that are no longer valid in the current topology.
+
+Do not replace the existing optimization algorithm.
+
+### B. Rerouting threshold
+
+Retain the configured 15% threshold.
+
+A reroute should occur only when the new path has strictly more than 15% lower aggregate cost than the old path.
+
+Mathematically:
+
+`new_cost < old_cost * 0.85`
+
+Exactly 15% improvement should NOT trigger rerouting.
+
+Handle zero, invalid, and non-finite costs safely.
+
+### C. Forward and reverse flow tracking
+
+The existing controller tracks forward and reverse flow entries.
+
+Ensure that successful rerouting updates both directions consistently.
+
+For a symmetric undirected topology, the reverse path should be the reversed forward path.
+
+Avoid processing the same flow pair twice during a single monitoring cycle.
+
+Do not assume installation succeeded when required flow rules could not be dispatched.
+
+### D. Installation success
+
+Inspect `install_path()` and its callers.
+
+Make installation report whether all required flow-mod messages could be dispatched to the required datapaths with valid output ports.
+
+Do not update active-flow state after an unsuccessful or incomplete installation.
+
+Important: Sending an OpenFlow message does not itself prove that a switch successfully installed the rule. Do not claim confirmed switch installation unless an appropriate barrier/error-handling mechanism establishes it.
+
+Avoid introducing a complicated new flow-management architecture.
+
+## 3. Required fixes
+
+Implement the following corrections.
+
+**Fix 1 – Path objective consistency**
+- Make `_best_path()` and the rerouting comparison use the same aggregate cost objective.
+- Remove the inconsistency between summed reciprocal costs and minimum edge score.
+- Ensure invalid metrics cannot silently produce misleading paths.
+
+**Fix 2 – Active-flow state**
+- Update stored flow paths after successful rerouting.
+- Keep forward and reverse entries synchronized.
+- Prevent repeated installation of an unchanged route.
+- Avoid processing the same flow pair twice per monitoring cycle.
+
+**Fix 3 – Topology changes**
+- Validate previously stored paths against the current graph.
+- Handle removed edges and disconnected graphs.
+- Handle missing source and destination switches.
+- Ensure one invalid flow does not terminate processing of other flows.
+
+**Fix 4 – Threshold correctness**
+- Implement the strictly-greater-than-15% improvement rule.
+- Handle boundary cases and invalid costs.
+
+**Fix 5 – Single-switch paths**
+- Handle paths containing only one switch.
+- Do not assign arbitrary infinity values that prevent meaningful comparison.
+- Preserve valid same-switch flow behavior.
+
+**Fix 6 – Partial installation**
+- Detect missing datapaths and unavailable output ports.
+- Report incomplete installation.
+- Update tracked flow state only when the required messages have been dispatched successfully.
+- Do not blindly delete old flow rules during this milestone.
+
+**Fix 7 – Monitoring resilience**
+- Isolate errors while processing individual flows.
+- Ensure an invalid flow does not unexpectedly terminate the monitoring loop.
+- Add useful logging for failed calculations and incomplete installations.
+
+## 4. Testing requirements
+
+Create an appropriate unit-test structure if one does not exist.
+
+Use pytest unless the existing project has a compelling reason to use another framework.
+
+Write tests for:
+
+1. Correct shortest-path selection.
+2. Aggregate path-cost calculation.
+3. Consistency between selection and rerouting objectives.
+4. Exactly 15% improvement does not trigger rerouting.
+5. Improvement greater than 15% triggers rerouting.
+6. Improvement below 15% does not trigger rerouting.
+7. Correct forward-path update.
+8. Correct reverse-path update.
+9. No repeated rerouting after successful state update.
+10. Disconnected graph handling.
+11. Missing endpoint handling.
+12. Removed edge handling.
+13. Invalid, negative, NaN and infinite costs.
+14. Single-switch path handling.
+15. Multiple flows processed independently.
+16. Missing datapath handling.
+17. Missing output-port handling.
+18. Incomplete installation does not update active-flow state.
+
+Use mocked Ryu datapaths and OpenFlow messages where appropriate.
+
+Tests must not require a running Mininet topology or physical network.
+
+## 5. Implementation constraints
+
+- Preserve the existing Ryu architecture.
+- Preserve NetworkX.
+- Preserve OpenFlow 1.3.
+- No AI/ML.
+- No unnecessary dependencies.
+- No complete rewrite.
+- No unrelated refactoring.
+- No V2 functionality.
+- Preserve existing project attribution.
+- Keep functions understandable and maintainable.
+- Do not silently swallow exceptions.
+- Do not claim runtime validation that has not been performed.
+
+Do not modify unrelated QoS measurement logic, topology design, or the overall scoring model unless a change is strictly necessary for the approved fixes.
+
+## 6. Execution workflow
+
+Follow this sequence:
+
+### Phase 1 – Baseline inspection
+- Inspect the current repository state.
+- Check `git status`.
+- Review the relevant functions and existing tests.
+- Do not overwrite unrelated user changes.
+- Record the baseline test situation.
+
+### Phase 2 – Tests
+- Create tests for the approved behavior.
+- Use controlled graphs and mocked datapaths.
+- Run the tests and identify expected failures.
+
+### Phase 3 – Implementation
+- Implement the corrections.
+- Keep changes focused.
+- Preserve existing functionality.
+- Add clear logging and error handling.
+
+### Phase 4 – Validation
+- Run the complete available test suite.
+- Run any relevant static checks available in the project.
+- Fix regressions introduced by your changes.
+- Inspect the final Git diff.
+- Confirm that no unrelated files were changed.
+
+Do not commit or push anything to GitHub.
+
+## 7. Final report
+
+After implementation, provide:
+
+### A. Files changed
+List every created or modified file and explain why.
+
+### B. Bugs fixed
+Explain how each of the seven confirmed issues was addressed.
+
+### C. Technical implementation
+Explain the changes to path selection, path cost, rerouting, flow tracking, and installation handling.
+
+### D. Test results
+Report:
+- Exact test commands.
+- Number of passed tests.
+- Number of failed tests.
+- Any skipped tests.
+- Any remaining limitations.
+
+### E. Git diff summary
+Report the number of files changed and the insertion/deletion counts.
+
+### F. Runtime validation still required
+Identify what must still be tested with Ryu, Open vSwitch, and Mininet.
+
+### G. Remaining risks
+List any unresolved issues honestly.
+
+## FINAL REQUIREMENT
+
+You are authorized to modify project files for this milestone.
+
+However:
+- Stay within the approved scope.
+- Do not proceed to Milestone 2.
+- Do not push or commit changes.
+- Do not claim that Mininet or live SDN validation passed unless actually performed.
+
+The goal is a correct, tested Milestone 1 implementation, not merely code that appears to work.

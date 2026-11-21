@@ -1,0 +1,21 @@
+Review the current Milestone 1 implementation.
+
+I identified one issue in `_best_path()`:
+
+It currently validates every edge in `self.topo_graph` and immediately returns `None` if any edge has an invalid or missing cost. This means one unrelated invalid link can prevent path selection even when a valid route exists.
+
+Fix only this issue.
+
+Requirements:
+1. Preserve invalid edges in the original topology graph if they are needed by other existing topology functionality.
+2. For shortest-path calculation, use a graph containing only edges with valid, finite, non-negative costs.
+3. Do not allow NetworkX's default weight of 1.0 for edges with missing costs.
+4. Preserve the existing summed-cost objective.
+5. Return None only when no valid route exists between the requested switches.
+6. Add regression tests proving:
+   - A valid route is still selected when an unrelated edge has an invalid cost.
+   - An invalid-cost edge is not selected when a valid alternative exists.
+   - No route is returned when all possible routes contain invalid-cost edges.
+7. Do not modify unrelated functionality, add features, refactor other code, commit, or push.
+
+Run the full test suite and report the exact results and changed files.

@@ -16,10 +16,9 @@ Pipeline (matches the Methodology slide of the project):
 
 Design notes
 ------------
-* Two edge switches (s1, s2 in topology.py) are host-facing; three
-  core switches (s3, s4, s5) each provide one alternate path between
-  them, with distinct static QoS characteristics (delay / bandwidth /
-  loss) mirroring the physical link settings in topology.py.
+* The current Mininet topology is a four-switch diamond: host-facing
+  switches s1 and s4, with paths s1-s2-s4 and s1-s3-s4. Static QoS
+  profiles mirror the configured link characteristics in topology.py.
 * Topology (switches + links) is auto-discovered via
   ryu.topology.api / ryu.topology.switches, so this also works with
   other topologies as long as QOS_PROFILE / DEFAULT_PROFILE covers
@@ -37,6 +36,8 @@ Run:
     ryu-manager --observe-links qos_controller.py
 """
 
+import math
+import numbers
 import time
 from collections import defaultdict
 
@@ -54,7 +55,7 @@ from ryu.topology.api import get_switch, get_link
 
 # ---------------------------------------------------------------------------
 # Static QoS profile per switch-to-switch link, keyed by dpid pair.
-# Keep in sync with LINK_PROFILES in topology.py (s1=1, s2=2, s3=3, s4=4, s5=5).
+# Keep switch DPIDs and link characteristics in sync with topology.py (s1-s4).
 # ---------------------------------------------------------------------------
 QOS_PROFILE = {
     # GOOD PATH: s1 -> s2 -> s4
@@ -67,11 +68,13 @@ QOS_PROFILE = {
 }
 DEFAULT_PROFILE = dict(delay=5.0, bw=10.0, loss=0.5, jitter=1.0)
 
-# Scoring weights - tune to taste. Higher score == better path.
-W_DELAY, W_BW, W_LOSS, W_JITTER, W_UTIL = 0.30, 0.30, 0.20, 0.10, 0.10
+# Scoring weights - higher score means a better link.
+# Utilization is the live metric that enables congestion-aware rerouting;
+# the remaining 45% preserves the original relative weighting of static QoS.
+W_DELAY, W_BW, W_LOSS, W_JITTER, W_UTIL = 0.15, 0.15, 0.10, 0.05, 0.55
 
 MONITOR_INTERVAL_SEC = 10
-REROUTE_MARGIN = 0.15   # only reroute an active flow if new path is >=15% better
+REROUTE_MARGIN = 0.15   # reroute only if aggregate cost is strictly >15% lower
 
 
 def normalize(value, worst, best):
@@ -161,9 +164,17 @@ class QoSAwarePathSelector(app_manager.RyuApp):
             inter_switch_ports[src_dpid].add(src_port)
             inter_switch_ports[dst_dpid].add(dst_port)
 
-            score = self._link_score(src_dpid, dst_dpid)
-            self.topo_graph.add_edge(src_dpid, dst_dpid, score=score,
-                                      cost=self._score_to_cost(score))
+            try:
+                score = self._link_score(src_dpid, dst_dpid)
+                if not math.isfinite(score) or score < 0:
+                    raise ValueError("edge score must be finite and non-negative")
+                cost = self._score_to_cost(score)
+            except (TypeError, ValueError, OverflowError) as exc:
+                self.logger.warning("Invalid QoS metric on link %s-%s: %s",
+                                    src_dpid, dst_dpid, exc)
+                self.topo_graph.add_edge(src_dpid, dst_dpid)
+            else:
+                self.topo_graph.add_edge(src_dpid, dst_dpid, score=score, cost=cost)
 
         # spanning tree for loop-free flooding of ARP / broadcast
         self.spanning_tree_ports.clear()
@@ -212,13 +223,30 @@ class QoSAwarePathSelector(app_manager.RyuApp):
     @staticmethod
     def _score_to_cost(score):
         # networkx path algorithms minimize cost; invert the score.
+        if isinstance(score, bool) or not isinstance(score, numbers.Real):
+            raise ValueError("edge score must be a finite non-negative number")
+        try:
+            score = float(score)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("edge score must be a finite non-negative number") from exc
+        if not math.isfinite(score) or score < 0:
+            raise ValueError("edge score must be a finite non-negative number")
         return 1.0 / max(score, 1e-3)
 
     def _update_link_cost(self):
         for u, v in self.topo_graph.edges():
-            score = self._link_score(u, v)
+            try:
+                score = self._link_score(u, v)
+                if not math.isfinite(score) or score < 0:
+                    raise ValueError("edge score must be finite and non-negative")
+                cost = self._score_to_cost(score)
+            except (TypeError, ValueError, OverflowError) as exc:
+                self.topo_graph[u][v].pop("score", None)
+                self.topo_graph[u][v].pop("cost", None)
+                self.logger.warning("Invalid QoS metric on link %s-%s: %s", u, v, exc)
+                continue
             self.topo_graph[u][v]["score"] = score
-            self.topo_graph[u][v]["cost"] = self._score_to_cost(score)
+            self.topo_graph[u][v]["cost"] = cost
 
     # ------------------------------------------------------------------
     # Periodic monitoring: poll port stats, refresh QoS scores, re-route
@@ -229,7 +257,12 @@ class QoSAwarePathSelector(app_manager.RyuApp):
                 self._request_port_stats(dp)
             hub.sleep(MONITOR_INTERVAL_SEC)
             self._update_link_cost()
-            self._reoptimize_active_flows()
+            try:
+                self._reoptimize_active_flows()
+            except Exception:
+                # A monitor-cycle failure should be visible without killing
+                # subsequent statistics and rerouting cycles.
+                self.logger.exception("Unexpected error while reoptimizing active flows")
 
     def _request_port_stats(self, dp):
         parser = dp.ofproto_parser
@@ -256,34 +289,116 @@ class QoSAwarePathSelector(app_manager.RyuApp):
     # Path selection
     # ------------------------------------------------------------------
     def _best_path(self, src_dpid, dst_dpid):
+        if src_dpid not in self.topo_graph or dst_dpid not in self.topo_graph:
+            self.logger.warning("Cannot calculate path for missing switch %s or %s",
+                                src_dpid, dst_dpid)
+            return None
         if src_dpid == dst_dpid:
             return [src_dpid]
+
+        # Keep malformed links in the topology graph for other features, but
+        # exclude them from path selection. NetworkX treats missing weights as
+        # 1.0, so passing the original graph would make those links usable.
+        path_graph = nx.Graph()
+        path_graph.add_nodes_from(self.topo_graph.nodes)
+        for u, v, attrs in self.topo_graph.edges(data=True):
+            if not self._valid_path_cost(attrs.get("cost")):
+                continue
+            path_graph.add_edge(u, v, cost=float(attrs["cost"]))
         try:
-            return nx.shortest_path(self.topo_graph, src_dpid, dst_dpid, weight="cost")
+            path = nx.shortest_path(path_graph, src_dpid, dst_dpid, weight="cost")
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return None
+        if self._path_cost(path) is None:
+            self.logger.warning("Cannot use selected path %s->%s: aggregate cost is invalid",
+                                src_dpid, dst_dpid)
+            return None
+        return path
 
-    def _path_score(self, path):
-        if len(path) < 2:
-            return float("inf")
-        return min(self.topo_graph[u][v]["score"] for u, v in zip(path, path[1:]))
+    @staticmethod
+    def _valid_path_cost(cost):
+        if isinstance(cost, bool) or not isinstance(cost, numbers.Real):
+            return False
+        try:
+            numeric_cost = float(cost)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return math.isfinite(numeric_cost) and numeric_cost >= 0
+
+    def _path_cost(self, path):
+        """Return a valid path's summed edge cost, or None if it is stale/bad."""
+        if not path:
+            return None
+        if any(switch not in self.topo_graph for switch in path):
+            return None
+
+        total = 0.0
+        for u, v in zip(path, path[1:]):
+            if not self.topo_graph.has_edge(u, v):
+                return None
+            cost = self.topo_graph[u][v].get("cost")
+            if not self._valid_path_cost(cost):
+                return None
+            total += float(cost)
+            if not math.isfinite(total):
+                return None
+        return total
 
     def _reoptimize_active_flows(self):
         """Continuous feedback loop: if a materially better path now
         exists for a live flow, re-pin it (matches 'Monitor Again' in
         the methodology)."""
+        processed_pairs = set()
         for (src_mac, dst_mac), old_path in list(self.active_flows.items()):
-            if src_mac not in self.host_location or dst_mac not in self.host_location:
+            pair = frozenset((src_mac, dst_mac))
+            if pair in processed_pairs:
                 continue
-            src_dpid = self.host_location[src_mac][0]
-            dst_dpid = self.host_location[dst_mac][0]
-            new_path = self._best_path(src_dpid, dst_dpid)
-            if not new_path or new_path == old_path:
-                continue
-            if self._path_score(new_path) > self._path_score(old_path) * (1 + REROUTE_MARGIN):
-                self.logger.info("Re-routing %s->%s : %s -> %s",
-                                  src_mac, dst_mac, old_path, new_path)
-                self.install_path(new_path, src_mac, dst_mac)
+            processed_pairs.add(pair)
+
+            try:
+                if src_mac not in self.host_location or dst_mac not in self.host_location:
+                    self.logger.warning("Skipping flow %s->%s: endpoint location is unknown",
+                                        src_mac, dst_mac)
+                    continue
+                src_dpid = self.host_location[src_mac][0]
+                dst_dpid = self.host_location[dst_mac][0]
+                new_path = self._best_path(src_dpid, dst_dpid)
+                if not new_path:
+                    continue
+
+                new_cost = self._path_cost(new_path)
+                old_cost = self._path_cost(old_path)
+                if new_cost is None:
+                    self.logger.warning("Skipping flow %s->%s: selected path has invalid cost",
+                                        src_mac, dst_mac)
+                    continue
+                if new_path == old_path and old_cost is not None:
+                    continue
+
+                # A stale path must be replaced when a valid route exists.
+                # A zero-cost old route cannot be improved by any valid
+                # non-negative route.
+                should_reroute = old_cost is None or (
+                    old_cost > 0 and new_cost < old_cost * (1 - REROUTE_MARGIN)
+                )
+                if not should_reroute:
+                    continue
+
+                reverse_path = list(reversed(new_path))
+                self.logger.info("Re-routing %s->%s : %s -> %s (cost %.6g -> %.6g)",
+                                 src_mac, dst_mac, old_path, new_path,
+                                 old_cost if old_cost is not None else float("nan"), new_cost)
+                forward_ok = self.install_path(new_path, src_mac, dst_mac)
+                reverse_ok = self.install_path(reverse_path, dst_mac, src_mac)
+                if forward_ok and reverse_ok:
+                    self.active_flows[(src_mac, dst_mac)] = list(new_path)
+                    self.active_flows[(dst_mac, src_mac)] = reverse_path
+                else:
+                    self.logger.warning(
+                        "Flow reroute incomplete for %s<->%s; retaining recorded paths",
+                        src_mac, dst_mac)
+            except Exception:
+                self.logger.exception("Failed to reoptimize flow %s->%s", src_mac, dst_mac)
 
     # ------------------------------------------------------------------
     # Packet-in: learn hosts, resolve ARP/flood, install QoS paths
@@ -304,9 +419,11 @@ class QoSAwarePathSelector(app_manager.RyuApp):
         src_mac, dst_mac = eth.src, eth.dst
 
         # learn where this host is attached
-        if self.host_location.get(src_mac) != (dpid, in_port):
-            self.host_location[src_mac] = (dpid, in_port)
-            self.logger.info("Learned host %s at switch %s port %s", src_mac, dpid, in_port)
+        # Learn hosts only on host-facing access ports
+        if in_port in self._access_ports(dpid):
+            if self.host_location.get(src_mac) != (dpid, in_port):
+                self.host_location[src_mac] = (dpid, in_port)
+                self.logger.info("Learned host %s at switch %s port %s", src_mac, dpid, in_port)
 
         # unicast, both endpoints known -> compute & install best QoS path
         if dst_mac in self.host_location and dst_mac != "ff:ff:ff:ff:ff:ff":
@@ -314,12 +431,12 @@ class QoSAwarePathSelector(app_manager.RyuApp):
             dst_dpid = self.host_location[dst_mac][0]
             path = self._best_path(src_dpid, dst_dpid)
             if path:
-                self.install_path(path, src_mac, dst_mac)
-                self.active_flows[(src_mac, dst_mac)] = path
-                self.active_flows[(dst_mac, src_mac)] = list(reversed(path))
-                # also forward this first packet along the path immediately
-                self._forward_packet_out(dp, msg, path, dst_mac, in_port)
-                return
+                if self.install_path(path, src_mac, dst_mac):
+                    self.active_flows[(src_mac, dst_mac)] = list(path)
+                    self.active_flows[(dst_mac, src_mac)] = list(reversed(path))
+                    # Also forward this first packet along the selected path.
+                    self._forward_packet_out(dp, msg, path, dst_mac, in_port)
+                    return
 
         # unknown destination / broadcast (ARP etc.) -> flood on spanning tree
         self._flood(dp, msg, in_port)
@@ -367,23 +484,44 @@ class QoSAwarePathSelector(app_manager.RyuApp):
     # Install flow entries for every hop along the chosen QoS path
     # ------------------------------------------------------------------
     def install_path(self, path, src_mac, dst_mac):
+        if self._path_cost(path) is None:
+            self.logger.warning("Cannot dispatch flow %s->%s: path is invalid: %s",
+                                src_mac, dst_mac, path)
+            return False
+
+        required = []
         for i, dpid in enumerate(path):
             dp = self.datapaths.get(dpid)
             if dp is None:
-                continue
-            parser = dp.ofproto_parser
+                self.logger.warning("Cannot dispatch flow %s->%s: switch %s is unavailable",
+                                    src_mac, dst_mac, dpid)
+                return False
 
             if i < len(path) - 1:
                 out_port = self.adjacency.get(dpid, {}).get(path[i + 1])
             else:
                 out_port = self.host_location.get(dst_mac, (None, None))[1]
-            if out_port is None:
-                continue
+            if not isinstance(out_port, int) or out_port <= 0:
+                self.logger.warning(
+                    "Cannot dispatch flow %s->%s: no valid output port on switch %s",
+                    src_mac, dst_mac, dpid)
+                return False
+            required.append((dp, out_port))
 
-            match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
-            actions = [parser.OFPActionOutput(out_port)]
-            self._add_flow(dp, priority=10, match=match, actions=actions,
-                            idle_timeout=60, hard_timeout=0)
+        dispatched = True
+        for dp, out_port in required:
+            try:
+                parser = dp.ofproto_parser
+                match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+                actions = [parser.OFPActionOutput(out_port)]
+                self._add_flow(dp, priority=10, match=match, actions=actions,
+                               idle_timeout=60, hard_timeout=0)
+            except Exception:
+                dispatched = False
+                self.logger.exception("Failed to dispatch flow rule for %s->%s on switch %s",
+                                      src_mac, dst_mac, getattr(dp, "id", "unknown"))
 
-        self.logger.info("Installed QoS path %s->%s : %s (score=%.3f)",
-                          src_mac, dst_mac, path, self._path_score(path))
+        if dispatched:
+            self.logger.info("Dispatched flow rules for %s->%s along %s (cost=%.6g)",
+                             src_mac, dst_mac, path, self._path_cost(path))
+        return dispatched
