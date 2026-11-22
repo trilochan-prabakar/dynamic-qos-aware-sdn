@@ -1,59 +1,48 @@
 # V1 Validation Notes
 
-These notes separate automated controller tests from runtime network checks. The
-runtime checks below were not performed during the maintenance pass. Earlier
-README text reported Mininet and traffic observations, but the repository does
-not contain their command output, logs, or result files, so those observations
-are not presented here as verified results.
+This document separates automated controller tests from live Mininet runtime evidence.
 
 ## 1. Automated unit and regression tests
 
-The complete pytest suite passed **39 tests** during this maintenance pass.
-The suite covers route selection and cost validation, monitoring-loop resilience,
-flow-rule dispatch reporting, known-unicast fallback behavior, and reroute
-failure handling. The tests use Ryu import stubs and mocked datapaths. They
-verify controller logic and local message-dispatch behavior; they do not verify
-switch-side flow installation.
+The repository's existing validation record reports **39 passing pytest tests** during its maintenance pass. The suite uses Ryu import stubs and mocked datapaths. It covers controller logic and local message-dispatch behavior; it does not independently verify switch-side flow installation.
 
-## 2. Mininet connectivity
+Run the suite with:
 
-Not run during this maintenance pass. The earlier README reported that
-`pingall` completed with no packet loss after controller and topology
-convergence, but supporting runtime output is not checked into this repository.
+```bash
+python -m pytest -v
+```
 
-## 3. Congestion-triggered rerouting
+## 2. Live Mininet connectivity and topology
 
-Not run in Mininet during this maintenance pass. The unit suite checks route
-selection and the configured strict 15% aggregate-cost improvement threshold.
-Those tests do not establish that a live switch rerouted traffic under load.
+The live demonstration recorded in [runtime-demo.md](runtime-demo.md) observed:
 
-## 4. Link failure and recovery
+- Four Open vSwitch bridges (s1–s4) connected to the Ryu controller at `tcp:127.0.0.1:6653`.
+- Mininet links connecting h1—s1, h2—s4, s1—s2—s4 and s1—s3—s4.
+- `pingall` completed with 0% dropped (2/2 received).
+- A later post-traffic 10-packet ping completed with 10/10 replies and 0% packet loss.
 
-Not run in Mininet during this maintenance pass. The earlier README described
-failover to the alternate route and return after link recovery, but no switch
-state or connectivity output is available in the repository to independently
-verify that runtime result.
+## 3. Active-flow rerouting
 
-## 5. TCP and UDP traffic experiments
+During TCP iperf traffic, the Ryu log recorded route changes between `[4, 2, 1]` and `[4, 3, 1]`. The controller logged computed cost changes and dispatch of forward and reverse flow-rule messages.
 
-Not run during this maintenance pass. The earlier README stated that TCP/UDP
-iperf runs were exercised and noted UDP loss and out-of-order datagrams under
-load. No raw traffic logs or measurements are checked in, so no throughput,
-latency, loss, or jitter result is claimed here.
+During one alternate-route interval, the s3 flow-table snapshot showed two priority-10 host-to-host forwarding entries with packet counters. This is separate switch-side evidence that those entries were present on s3 at the time of inspection.
 
-## 6. Limitations and interpretation
+## 4. Traffic measurements and interpretation
 
-- Delay, bandwidth, packet loss, and jitter are configured QoS profile values;
-  they are not measured live by the controller. Utilization is estimated from
-  OpenFlow port byte counters and configured link capacity.
-- A successful `send_msg()` call means the controller dispatched a message
-  locally. The implementation does not use OpenFlow barriers or error replies
-  to confirm that switches accepted or installed the rule.
-- During active-flow rerouting, the controller updates its recorded forward and
-  reverse paths only after both directional path dispatches complete. A
-  multi-switch path can be partially dispatched if a later datapath fails. The
-  controller logs the number of messages dispatched; it cannot roll back rules
-  that may already have been accepted by switches.
-- The pytest suite uses mocked Ryu datapaths. It is not a substitute for
-  connectivity, congestion, link failure/recovery, or TCP/UDP tests with Ryu,
-  Open vSwitch, and Mininet.
+One iperf run reported 46.9 MBytes transferred over approximately 92.5 seconds at an aggregate 4.25 Mbits/sec. Per-interval throughput varied. This is a single observed run, not a controlled benchmark.
+
+A five-packet ping issued while iperf was still active reported 20% packet loss. After iperf completed, a separate ten-packet ping reported 0% packet loss. These results are recorded separately.
+
+No controlled baseline-versus-rerouted throughput or latency comparison was performed, so no performance improvement is claimed.
+
+## 5. Link failure and recovery
+
+A dedicated link-failure/recovery experiment is not documented by the current runtime evidence. Controller path changes under changing computed costs were observed, but they should not be described as a controlled physical link-failure test.
+
+## 6. Limitations
+
+- Delay, bandwidth, packet loss and jitter are configured profile values; they are not independently measured live by the controller.
+- Utilization is estimated from OpenFlow port byte counters and configured link capacity.
+- A successful `send_msg()` call confirms local message dispatch, not switch-side acceptance. The implementation does not use OpenFlow barriers or error replies to confirm every rule.
+- Flow entries use `idle_timeout=60`; inspect them while relevant traffic is active.
+- The pytest suite uses mocked datapaths and does not replace runtime testing with Ryu, Open vSwitch and Mininet.
