@@ -46,15 +46,21 @@ An earlier 5-packet ping executed while iperf was still active reported 20% pack
 
 ## Evidence screenshots
 
-The accompanying screenshots are intended to be stored in `docs/images/` with these names:
+The screenshots below show the commands and output described above.
 
-- `all-switches-controller-connections.png` — controller address for s1–s4.
-- `mininet-topology-connections.png` — Mininet `net` output.
-- `connectivity.png` — initial `pingall` result.
-- `controller-flows.png` — s1 forwarding flow entries.
-- `dynamic-rerouting-controller.png` — Ryu rerouting log.
-- `alternate-path-s3-flows.png` — alternate-path forwarding entries on s3.
-- `final-connectivity.png` — post-traffic 10/10 ping result.
+![Controller connection endpoints for switches s1–s4](images/all-switches-controller-connections.png)
+
+![Mininet topology connections](images/mininet-topology-connections.png)
+
+![Initial pingall connectivity check](images/connectivity.png)
+
+![s1 forwarding flow entries](images/controller-flows.png)
+
+![Controller rerouting log output](images/dynamic-rerouting-controller.png)
+
+![Alternate-path forwarding entries on s3](images/alternate-path-s3-flows.png)
+
+![Post-traffic h1 to h2 ping results](images/final-connectivity.png)
 
 ## Interpretation and caveats
 

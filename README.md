@@ -145,6 +145,16 @@ Watch the Ryu terminal for path selection and re-routing messages. Flow entries 
 
 See [the automated validation notes](docs/validation.md) and [the observed runtime demonstration](docs/runtime-demo.md). These are separate evidence types: mocked unit tests validate controller logic, while the runtime notes document observed Mininet, OVS and Ryu output.
 
+## Runtime evidence
+
+The screenshots below record the Mininet topology, controller route changes, and post-traffic connectivity check. See the [runtime demo evidence](docs/runtime-demo.md) for all seven screenshots and the observations they show.
+
+![Mininet topology connections](docs/images/mininet-topology-connections.png)
+
+![Controller log showing route changes](docs/images/dynamic-rerouting-controller.png)
+
+![Final h1 to h2 ping results](docs/images/final-connectivity.png)
+
 ## Limitations
 
 - This is a Mininet lab implementation, not a production SDN controller.
